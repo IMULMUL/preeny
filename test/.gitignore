@@ -5,3 +5,8 @@
 /sock
 /uid
 /time
+/nowrite
+/setstdin_fread
+/setstdin_getc
+/setstdin_read
+/pdeathsig

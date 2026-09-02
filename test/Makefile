@@ -1,6 +1,6 @@
 .PHONY: all clean
 
-all: sock hello rand realloc uid sleep time setstdin_fread setstdin_getc setstdin_read nowrite
+all: sock hello rand realloc uid sleep time setstdin_fread setstdin_getc setstdin_read nowrite pdeathsig
 
 sock: sock.c
 hello: hello.c
@@ -13,6 +13,7 @@ setstdin_fread: setstdin_fread.c
 setstdin_getc: setstdin_getc.c
 setstdin_read: setstdin_read.c
 nowrite: nowrite.c
+pdeathsig: pdeathsig.c
 
 clean:
-	rm -f sock hello rand realloc uid sleep time setstdin_fread setstdin_getc setstdin_read nowrite
+	rm -f sock hello rand realloc uid sleep time setstdin_fread setstdin_getc setstdin_read nowrite pdeathsig

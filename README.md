@@ -29,6 +29,7 @@ Preeny has the following modules:
 | setcanary | Overwrites the canary with a user-provided one on program startup (amd64-only at the moment). |
 | setstdin  | Sets user defined STDIN data instead of real one, overriding `read`, `fread`, `fgetc`, `getc` and `getchar` calls. Read [here](#stdin-substitution) for more info |
 | nowrite | Forces open() to open files in readonly mode. Downgrading from readwrite or writeonly mode, and taking care of append, mktemp and other write-related flags as well |
+| pdeathsig | Makes a process, and everything it spawns, die when its parent dies. Read [here](#killing-whole-process-trees) for more info |
 
 ## Building
 
@@ -194,3 +195,50 @@ $ LD_PRELOAD=src/setstdin.so test/setstdin_fread
 D|ef|aul|t se|tstdi|n valu|e. Plea|se set P|REENY_STD|IN or PREE|NY_STDIN_FI|LENAME envir|onment variab|les to set you|r own value
 
 ```
+
+## Killing whole process trees
+
+`pdeathsig.so` makes a process -- and everything it goes on to spawn -- die when its parent dies.
+It's for the situation where you kill the forking service you were poking at and it leaves a litter of orphaned children behind, still holding your listening port hostage.
+
+```ShellSession
+$ LD_PRELOAD=x86_64-linux-gnu/pdeathsig.so ./some_forking_server
+```
+
+Now killing `some_forking_server` takes its workers, their workers, and anything it shelled out to down with it.
+
+The mechanism is Linux's `prctl(PR_SET_PDEATHSIG)`, which the kernel clears in every newly created task but preserves across `execve()`.
+So the module arms itself in three places:
+
+* in its **constructor**, which covers every descendant that `exec()`s -- `LD_PRELOAD` is inherited through `exec`, so the constructor simply runs again over there. This is what covers `system()`, `popen()` and `posix_spawn()`, none of which reach an interposable `fork()`/`clone()` symbol,
+* in a **`fork()`/`_Fork()`/`__fork()` hook**, which covers the children that never `exec` (the classic forking server), and
+* in a **`clone()`/`__clone()` hook**, for programs that call `clone()` themselves.
+
+Every link only ever arms itself against its own immediate parent, and the kernel keeps the armed signal across reparenting, so the effect chains all the way down.
+
+By default the signal is `SIGKILL`. `PREENY_PDEATHSIG` changes it, as a number or a name:
+
+```ShellSession
+$ PREENY_PDEATHSIG=SIGTERM LD_PRELOAD=x86_64-linux-gnu/pdeathsig.so ./some_forking_server
+$ PREENY_PDEATHSIG=15      LD_PRELOAD=x86_64-linux-gnu/pdeathsig.so ./some_forking_server
+```
+
+Unlike most preeny modules, this one validates its environment variable instead of just `atoi()`ing it, and it has to: `atoi("SIGKILL")` is `0`, and `prctl(PR_SET_PDEATHSIG, 0)` *succeeds* -- it means "disable" -- so a typo would otherwise leave you with a module that loads, prints nothing, and does nothing.
+An unparseable value gets an error and falls back to `SIGKILL`.
+
+Things that will surprise you, in rough order of how likely you are to hit them:
+
+* **It fires when the parent *thread* exits, not the parent process.** A child forked from a worker thread dies the moment that worker retires, even though the program is fine. That's the kernel's behavior, and no preload can fix it. It is this module's main source of false positives.
+* **Daemonizing does not work under it.** `setsid`, or any double-fork daemonize, exits the intermediate parent on purpose -- which is exactly the event this module kills on. Don't leave `pdeathsig.so` in a global `LD_PRELOAD`; use it per-run.
+* **Your shell is the parent.** Preloading this means the process dies when the shell that started it dies. Usually that's the point.
+* **It's inert on setuid/setgid binaries.** The loader ignores `LD_PRELOAD` for them, and the kernel clears the parent-death signal on a privileged `execve` anyway.
+* **A child that loses its parent mid-`exec` survives forever.** On the `system()`/`popen()`/`posix_spawn()` path a child can only arm itself once its constructor runs, and a parent that died during the `exec` has by then already been replaced by `init` -- so the child arms against `init` and nothing ever fires. The `fork()`/`clone()` hooks don't have this hole, because they sample the parent's pid *before* forking, but `prctl(PR_SET_PDEATHSIG)` takes no pid, so there is nothing the `exec` path can do about it.
+* **The target can un-arm itself.** `prctl(PR_SET_PDEATHSIG, 0)` is not interposed, and -- less obviously -- any change to euid/egid/fsuid/fsgid or capabilities silently clears the parent-death signal in the kernel, so a daemon that drops privileges after startup loses it. The module exports `void preeny_pdeathsig_arm(pid_t)`; call it with `0` to re-arm if you're in a position to.
+* **Delivery is permission-checked.** A parent that has dropped privileges cannot signal a more-privileged child.
+* **`pthread_create()` threads are never armed**, which is correct -- a thread is not a process, and arming one would mean "kill this thread when the thread that created it exits".
+* **Raw `syscall(SYS_clone)` and `clone3()` are missed.** There is nothing to interpose; glibc doesn't even export a `clone3` wrapper.
+* **`clone(CLONE_SETTLS)` tasks are not armed either.** A child that starts on a thread pointer its caller built cannot safely run libc code, and arming touches `errno`, which lives relative to that pointer. Passing such clones straight through is the only correct thing to do.
+* **Don't combine it with `defork.so`.** They both define `fork()`, and whichever comes first in `LD_PRELOAD` wins, so the combination is meaningless -- though it is at least harmless: `pdeathsig` checks that a fork really happened before doing anything, so it won't signal the target to death when stacked on a `fork()` that returns 0 without forking.
+
+`pdeathsig` only ever arms *itself*: `prctl(PR_SET_PDEATHSIG)` takes no pid, so there's no way to retroactively arm a child that started before the module loaded.
+It also deliberately does not make the process a subreaper: that changes who *adopts* orphans rather than killing them, which is a surprising global side effect and not what you asked for.

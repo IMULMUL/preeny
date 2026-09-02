@@ -68,6 +68,7 @@ eofkiller.so: CFLAGS+=-ldl
 setstdin.so: CFLAGS+=-ldl
 nowrite.so: CFLAGS+=-ldl
 depselect.so: CFLAGS+=-ldl
+pdeathsig.so: CFLAGS+=-ldl
 
 %.so: %.c $(COMMON_DEPS)
 	$(CC) $^ -o $@ -shared -fPIC $(CFLAGS)
