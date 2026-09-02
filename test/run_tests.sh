@@ -48,7 +48,8 @@ LD_PRELOAD=lib/libsetstdin.so ./bin/test_setstdin_getc
 LD_PRELOAD=lib/libsetstdin.so ./bin/test_setstdin_read
 
 # nowrite
-LD_PRELOAD=lib/libnowrite.so ./bin/test_nowrite
+check "nowrite: every open() is downgraded to read-only" \
+	env LD_PRELOAD=lib/libnowrite.so ./bin/test_nowrite
 
 # pdeathsig
 check "pdeathsig: fork()ed descendants die with their ancestor" \
